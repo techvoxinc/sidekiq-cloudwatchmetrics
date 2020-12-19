@@ -61,7 +61,7 @@ module Sidekiq::CloudWatchMetrics
       now = Time.now.to_f
       tick = now
       until @stop
-        logger.info { "Publishing Sidekiq CloudWatch Metrics" }
+        logger.debug { "Publishing Sidekiq CloudWatch Metrics" }
         publish
 
         now = Time.now.to_f
