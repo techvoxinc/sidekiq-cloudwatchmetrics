@@ -148,36 +148,6 @@ module Sidekiq::CloudWatchMetrics
         },
       ]
 
-      processes.each do |process|
-        metrics << {
-          metric_name: "Utilization",
-          dimensions: [{name: "Hostname", value: process["hostname"]}],
-          timestamp: now,
-          value: process["busy"] / process["concurrency"].to_f * 100.0,
-          unit: "Percent",
-        }
-      end
-
-      queues.each do |(queue_name, queue_size)|
-        metrics << {
-          metric_name: "QueueSize",
-          dimensions: [{name: "QueueName", value: queue_name}],
-          timestamp: now,
-          value: queue_size,
-          unit: "Count",
-        }
-
-        queue_latency = Sidekiq::Queue.new(queue_name).latency
-
-        metrics << {
-          metric_name: "QueueLatency",
-          dimensions: [{name: "QueueName", value: queue_name}],
-          timestamp: now,
-          value: queue_latency,
-          unit: "Seconds",
-        }
-      end
-
       unless @additional_dimensions.empty?
         metrics = metrics.each do |metric|
           metric[:dimensions] = (metric[:dimensions] || []) + @additional_dimensions
