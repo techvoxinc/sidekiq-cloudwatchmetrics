@@ -7,9 +7,9 @@ require "sidekiq/util"
 require "aws-sdk-cloudwatch"
 
 module Sidekiq::CloudWatchMetrics
-  def self.enable!(client: Aws::CloudWatch::Client.new, additional_dimensions: {})
+  def self.enable!(**kwargs)
     Sidekiq.configure_server do |config|
-      publisher = Publisher.new(client: client, additional_dimensions: additional_dimensions)
+      publisher = Publisher.new(**kwargs)
 
       if Sidekiq.options[:lifecycle_events].has_key?(:leader)
         # Only publish metrics on the leader if we have a leader (sidekiq-ent)
