@@ -45,8 +45,8 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
 
     subject(:publisher) { Sidekiq::CloudWatchMetrics::Publisher.new(client: client) }
 
-    describe "#publish" do
-      it "publishes sidekiq metrics to cloudwatch" do
+    RSpec.shared_examples 'publishing sidekiq metrics to cloudwatch' do |options = {}|
+      it "publishes sidekiq metrics to cloudwatch under the #{options.fetch(:expected_namespace)} namespace" do
         Timecop.freeze(now = Time.now) do
           stats = instance_double(Sidekiq::Stats,
             processed: 123,
@@ -71,7 +71,7 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
           publisher.publish
 
           expect(client).to have_received(:put_metric_data).with(
-            namespace: "Sidekiq",
+            namespace: options.fetch(:expected_namespace),
             metric_data: contain_exactly(
               {
                 metric_name: "ProcessedJobs",
@@ -198,6 +198,16 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
             ),
           )
         end
+      end
+    end
+
+    describe "#publish" do
+      include_examples 'publishing sidekiq metrics to cloudwatch', expected_namespace: 'Sidekiq'
+
+      context 'with a custom namespace' do
+        subject(:publisher) { Sidekiq::CloudWatchMetrics::Publisher.new(client: client, namespace: 'Sidekiq-Test') }
+
+        include_examples 'publishing sidekiq metrics to cloudwatch', expected_namespace: 'Sidekiq-Test'
       end
 
       it "publishes custom dimensions" do
@@ -415,6 +425,18 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
 
           expect(client).to have_received(:put_metric_data).exactly(4).times
         end
+      end
+    end
+
+    describe "#stop" do
+      it "doesn't raise ThreadError" do
+        thread = double("thread", wakeup: true, join: true)
+        allow(thread).to receive(:wakeup).and_raise(ThreadError)
+        publisher.instance_variable_set("@thread", thread)
+
+        expect do
+          publisher.stop
+        end.not_to raise_error
       end
     end
   end
