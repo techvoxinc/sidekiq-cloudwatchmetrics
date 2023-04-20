@@ -45,13 +45,14 @@ module Sidekiq::CloudWatchMetrics
 
     INTERVAL = 60 # seconds
 
-    def initialize(config: Sidekiq, client: Aws::CloudWatch::Client.new, namespace: "Sidekiq", process_metrics: true, additional_dimensions: {})
+    def initialize(config: Sidekiq, client: Aws::CloudWatch::Client.new, namespace: "Sidekiq", queue_metrics: true, process_metrics: true, additional_dimensions: {})
       # Sidekiq 6.5+ requires @config, which defaults to the top-level
       # `Sidekiq` module, but can be overridden when running multiple Sidekiqs.
       @config = config
       @client = client
       @namespace = namespace
       @process_metrics = process_metrics
+      @queue_metrics = queue_metrics
       @additional_dimensions = additional_dimensions.map { |k, v| {name: k.to_s, value: v.to_s} }
     end
 
@@ -204,24 +205,26 @@ module Sidekiq::CloudWatchMetrics
         end
       end
 
-      queues.each do |(queue_name, queue_size)|
-        metrics << {
-          metric_name: "QueueSize",
-          dimensions: [{name: "QueueName", value: queue_name}],
-          timestamp: now,
-          value: queue_size,
-          unit: "Count",
-        }
+      if @queue_metrics
+        queues.each do |(queue_name, queue_size)|
+          metrics << {
+            metric_name: "QueueSize",
+            dimensions: [{name: "QueueName", value: queue_name}],
+            timestamp: now,
+            value: queue_size,
+            unit: "Count",
+          }
 
-        queue_latency = Sidekiq::Queue.new(queue_name).latency
+          queue_latency = Sidekiq::Queue.new(queue_name).latency
 
-        metrics << {
-          metric_name: "QueueLatency",
-          dimensions: [{name: "QueueName", value: queue_name}],
-          timestamp: now,
-          value: queue_latency,
-          unit: "Seconds",
-        }
+          metrics << {
+            metric_name: "QueueLatency",
+            dimensions: [{name: "QueueName", value: queue_name}],
+            timestamp: now,
+            value: queue_latency,
+            unit: "Seconds",
+          }
+        end
       end
 
       unless @additional_dimensions.empty?
