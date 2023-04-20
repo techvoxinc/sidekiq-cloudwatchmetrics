@@ -45,14 +45,14 @@ module Sidekiq::CloudWatchMetrics
 
     INTERVAL = 60 # seconds
 
-    def initialize(config: Sidekiq, client: Aws::CloudWatch::Client.new, namespace: "Sidekiq", queue_metrics: true, process_metrics: true, additional_dimensions: {})
+    def initialize(config: Sidekiq, client: Aws::CloudWatch::Client.new, namespace: "Sidekiq", exclude_queue_prefix: "", process_metrics: true, additional_dimensions: {})
       # Sidekiq 6.5+ requires @config, which defaults to the top-level
       # `Sidekiq` module, but can be overridden when running multiple Sidekiqs.
       @config = config
       @client = client
       @namespace = namespace
       @process_metrics = process_metrics
-      @queue_metrics = queue_metrics
+      @exclude_queue_prefix = exclude_queue_prefix
       @additional_dimensions = additional_dimensions.map { |k, v| {name: k.to_s, value: v.to_s} }
     end
 
@@ -165,26 +165,26 @@ module Sidekiq::CloudWatchMetrics
         }
       end
 
-      processes.group_by do |process|
-        process["tag"]
-      end.each do |(tag, tag_processes)|
-        next if tag.nil?
-
-        tag_utilization = calculate_utilization(tag_processes) * 100.0
-
-        unless tag_utilization.nan?
-          metrics << {
-            metric_name: "Utilization",
-            dimensions: [{name: "Tag", value: tag}],
-            timestamp: now,
-            value: tag_utilization,
-            unit: "Percent",
-          }
-        end
-      end
-
       if @process_metrics
-        processes.each do |process|
+        processes.group_by do |process|
+          process["tag"]
+        end.each do |(tag, tag_processes)|
+          next if tag.nil?
+
+          tag_utilization = calculate_utilization(tag_processes) * 100.0
+
+          unless tag_utilization.nan?
+            metrics << {
+              metric_name: "Utilization",
+              dimensions: [{name: "Tag", value: tag}],
+              timestamp: now,
+              value: tag_utilization,
+              unit: "Percent",
+            }
+          end
+        end
+
+          processes.each do |process|
           process_utilization = process["busy"] / process["concurrency"].to_f * 100.0
 
           unless process_utilization.nan?
@@ -205,8 +205,8 @@ module Sidekiq::CloudWatchMetrics
         end
       end
 
-      if @queue_metrics
-        queues.each do |(queue_name, queue_size)|
+      queues.each do |(queue_name, queue_size)|
+        if @exclude_queue_prefix.empty? || !queue_name.starts_with?(@exclude_queue_prefix)
           metrics << {
             metric_name: "QueueSize",
             dimensions: [{name: "QueueName", value: queue_name}],
