@@ -107,6 +107,11 @@ module Sidekiq::CloudWatchMetrics
       processes = Sidekiq::ProcessSet.new.to_enum(:each).to_a
       queues = stats.queues
 
+      # Filter processes to only include those running on the default capsule
+      default_capsule_processes = processes.select do |process|
+        process['capsules'].nil? || process['capsules'].keys == ['default']
+      end
+
       metrics = [
         {
           metric_name: "ProcessedJobs",
@@ -165,12 +170,12 @@ module Sidekiq::CloudWatchMetrics
         {
           metric_name: "Capacity",
           timestamp: now,
-          value: calculate_capacity(processes),
+          value: calculate_capacity(default_capsule_processes),
           unit: "Count",
         },
       ]
 
-      utilization = calculate_utilization(processes) * 100.0
+      utilization = calculate_utilization(default_capsule_processes) * 100.0
 
       unless utilization.nan?
         metrics << {
@@ -182,7 +187,7 @@ module Sidekiq::CloudWatchMetrics
       end
 
       if @process_metrics
-        processes.group_by do |process|
+        default_capsule_processes.group_by do |process|
           process["tag"]
         end.each do |(tag, tag_processes)|
           next if tag.nil?
@@ -210,7 +215,7 @@ module Sidekiq::CloudWatchMetrics
           end
         end
 
-          processes.each do |process|
+        default_capsule_processes.each do |process|
           process_utilization = process["busy"] / process["concurrency"].to_f * 100.0
 
           unless process_utilization.nan?
