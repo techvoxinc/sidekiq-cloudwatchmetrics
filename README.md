@@ -1,7 +1,5 @@
 # Sidekiq CloudWatch Metrics
 
-[![Build Status](https://travis-ci.org/sj26/sidekiq-cloudwatchmetrics.svg)](https://travis-ci.org/sj26/sidekiq-cloudwatchmetrics)
-
 Runs a thread inside your Sidekiq processes to report metrics to CloudWatch
 useful for autoscaling and keeping an eye on your queues.
 
@@ -43,9 +41,14 @@ Sidekiq::CloudWatchMetrics.enable!(client: Aws::CloudWatch::Client.new)
 The default namespace for metrics is "Sidekiq". You can configure this with the `namespace` option:
 
 ```ruby
-Sidekiq::CloudWatchMetrics.enable!(client: Aws::CloudWatch::Client.new, namespace: "Sidekiq-Staging")
+Sidekiq::CloudWatchMetrics.enable!(namespace: "Sidekiq-Staging")
 ```
 
+Metrics are published every 60 seconds by default. You can adjust this with the `interval` option:
+
+```ruby
+Sidekiq::CloudWatchMetrics.enable!(interval: 30)
+```
 
 ## Development
 

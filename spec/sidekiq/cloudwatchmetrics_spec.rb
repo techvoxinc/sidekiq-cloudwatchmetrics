@@ -1,5 +1,7 @@
 require "spec_helper"
 
+require "fiber"
+
 RSpec.describe Sidekiq::CloudWatchMetrics do
   describe ".enable!" do
     # Sidekiq.options is deprecated as of Sidekiq 6.5, and must be accessed
@@ -53,6 +55,58 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
     before { allow(client).to receive(:put_metric_data) }
 
     subject(:publisher) { Sidekiq::CloudWatchMetrics::Publisher.new(client: client) }
+
+    describe "#run" do
+      it "publishes metrics until stopped" do
+        allow(publisher).to receive(:sleep) { |seconds| Fiber.yield(:sleep, seconds) }
+        allow(publisher).to receive(:publish) { Fiber.yield(:publish) }
+
+        fiber = Fiber.new { publisher.run }
+        expect(fiber.resume).to eql(:publish)
+        expect(fiber.resume).to match([:sleep, be_a_kind_of(Numeric) & (be < Sidekiq::CloudWatchMetrics::Publisher::DEFAULT_INTERVAL)])
+        expect(fiber.resume).to eql(:publish)
+        expect(fiber.resume).to match([:sleep, be_a_kind_of(Numeric) & (be < (Sidekiq::CloudWatchMetrics::Publisher::DEFAULT_INTERVAL * 2))])
+
+        publisher.stop
+        fiber.resume
+        expect(fiber).not_to be_alive
+      end
+
+      context "with a custom interval" do
+        subject(:publisher) { Sidekiq::CloudWatchMetrics::Publisher.new(client: client, interval: 30) }
+
+        it "respects a custom interval" do
+          allow(publisher).to receive(:sleep) { |seconds| Fiber.yield(:sleep, seconds) }
+          allow(publisher).to receive(:publish) { Fiber.yield(:publish) }
+
+          fiber = Fiber.new { publisher.run }
+          expect(fiber.resume).to eql(:publish)
+          expect(fiber.resume).to match([:sleep, be_a_kind_of(Numeric) & (be < 30)])
+
+          publisher.stop
+          fiber.resume
+          expect(fiber).not_to be_alive
+        end
+      end
+
+      it "survives an error raised during publishing" do
+        allow(publisher).to receive(:sleep) { |seconds| Fiber.yield(:sleep) }
+
+        exception = RuntimeError.new("oh no")
+        allow(publisher).to receive(:publish).and_invoke(lambda { raise exception }, lambda { Fiber.yield(:publish) })
+        allow(publisher).to receive(:handle_exception) { |exception| Fiber.yield(:exception, exception) }
+
+        fiber = Fiber.new { publisher.run }
+        expect(fiber.resume).to eql([:exception, exception])
+        expect(fiber.resume).to eql(:sleep)
+        expect(fiber.resume).to eql(:publish)
+        expect(fiber.resume).to eql(:sleep)
+
+        publisher.stop
+        fiber.resume
+        expect(fiber).not_to be_alive
+      end
+    end
 
     describe "#publish" do
       let(:stats) do
@@ -208,6 +262,94 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
         end
       end
 
+      context "with a custom interval of less than 60" do
+        subject(:publisher) { Sidekiq::CloudWatchMetrics::Publisher.new(client: client, interval: 30) }
+
+        it "passes sets a storage resolution of 1" do
+          Timecop.freeze(now = Time.now) do
+            publisher.publish
+
+            expect(client).to have_received(:put_metric_data).with(
+              namespace: "Sidekiq",
+              metric_data: including(
+                {
+                  metric_name: "ProcessedJobs",
+                  timestamp: now,
+                  value: 123,
+                  unit: "Count",
+                  storage_resolution: 1,
+                },
+                {
+                  metric_name: "FailedJobs",
+                  timestamp: now,
+                  value: 456,
+                  unit: "Count",
+                  storage_resolution: 1,
+                },
+                {
+                  metric_name: "QueueSize",
+                  dimensions: [{name: "QueueName", value: "bar"}],
+                  timestamp: now,
+                  value: 2,
+                  unit: "Count",
+                  storage_resolution: 1,
+                },
+                {
+                  metric_name: "QueueLatency",
+                  dimensions: [{name: "QueueName", value: "bar"}],
+                  timestamp: now,
+                  value: 1.23,
+                  unit: "Seconds",
+                  storage_resolution: 1,
+                },
+              )
+            )
+          end
+        end
+      end
+
+      context "with a custom interval of more than 60" do
+        subject(:publisher) { Sidekiq::CloudWatchMetrics::Publisher.new(client: client, interval: 120) }
+
+        it "doesn't pass a storage resolution" do
+          Timecop.freeze(now = Time.now) do
+            publisher.publish
+
+            expect(client).to have_received(:put_metric_data).with(
+              namespace: "Sidekiq",
+              metric_data: including(
+                {
+                  metric_name: "ProcessedJobs",
+                  timestamp: now,
+                  value: 123,
+                  unit: "Count",
+                },
+                {
+                  metric_name: "FailedJobs",
+                  timestamp: now,
+                  value: 456,
+                  unit: "Count",
+                },
+                {
+                  metric_name: "QueueSize",
+                  dimensions: [{name: "QueueName", value: "bar"}],
+                  timestamp: now,
+                  value: 2,
+                  unit: "Count",
+                },
+                {
+                  metric_name: "QueueLatency",
+                  dimensions: [{name: "QueueName", value: "bar"}],
+                  timestamp: now,
+                  value: 1.23,
+                  unit: "Seconds",
+                },
+              )
+            )
+          end
+        end
+      end
+
       context "with lots of queues" do
         let(:queues) { 10.times.each_with_object({}) { |i, hash| hash["queue#{i}"] = double(size: 1, latency: 1.23) } }
 
@@ -225,8 +367,9 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
       context "with process tags" do
         let(:processes) do
           [
-            Sidekiq::Process.new("busy" => 5, "concurrency" => 10, "hostname" => "foo", "tag" => "default"),
+            Sidekiq::Process.new("busy" => 5, "concurrency" => 5, "hostname" => "foo", "tag" => "default"),
             Sidekiq::Process.new("busy" => 2, "concurrency" => 20, "hostname" => "bar", "tag" => "shard-one"),
+            Sidekiq::Process.new("busy" => 0, "concurrency" => 5, "hostname" => "baz", "tag" => "default"),
           ]
         end
 
@@ -240,8 +383,15 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
                 {
                   metric_name: "Utilization",
                   timestamp: now,
-                  value: 30.0,
+                  value: 36.66666666666667,
                   unit: "Percent",
+                },
+                {
+                  metric_name: "Capacity",
+                  dimensions: [{name: "Tag", value: "default"}],
+                  timestamp: now,
+                  unit: "Count",
+                  value: 10,
                 },
                 {
                   metric_name: "Utilization",
@@ -249,6 +399,13 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
                   timestamp: now,
                   value: 50.0,
                   unit: "Percent",
+                },
+                {
+                  metric_name: "Capacity",
+                  dimensions: [{name: "Tag", value: "shard-one"}],
+                  timestamp: now,
+                  unit: "Count",
+                  value: 20,
                 },
                 {
                   metric_name: "Utilization",
@@ -262,7 +419,7 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
                   dimensions: [{name: "Hostname", value: "foo"}, {name: "Tag", value: "default"}],
                   timestamp: now,
                   unit: "Percent",
-                  value: 50.0,
+                  value: 100.0,
                 },
                 {
                   metric_name: "Utilization",
@@ -270,6 +427,13 @@ RSpec.describe Sidekiq::CloudWatchMetrics do
                   timestamp: now,
                   unit: "Percent",
                   value: 10.0,
+                },
+                {
+                  metric_name: "Utilization",
+                  dimensions: [{name: "Hostname", value: "baz"}, {name: "Tag", value: "default"}],
+                  timestamp: now,
+                  unit: "Percent",
+                  value: 0.0,
                 },
               ),
             )

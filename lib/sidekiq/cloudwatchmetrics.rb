@@ -8,7 +8,7 @@ require "aws-sdk-cloudwatch"
 module Sidekiq::CloudWatchMetrics
   def self.enable!(**kwargs)
     Sidekiq.configure_server do |config|
-      publisher = Publisher.new(**kwargs)
+      publisher = Publisher.new(config: config, **kwargs)
 
       # Sidekiq enterprise has a globally unique leader thread, making it
       # easier to publish the cluster-wide metrics from one place.
@@ -43,13 +43,24 @@ module Sidekiq::CloudWatchMetrics
       include Sidekiq::Component
     end
 
-    INTERVAL = 60 # seconds
+    DEFAULT_INTERVAL = 60 # seconds
 
-    def initialize(config: Sidekiq, client: Aws::CloudWatch::Client.new, namespace: "Sidekiq", exclude_queue_prefix: "", process_metrics: true, additional_dimensions: {})
-      # Sidekiq 6.5+ requires @config, which defaults to the top-level
-      # `Sidekiq` module, but can be overridden when running multiple Sidekiqs.
+    private def default_config
+      # Sidekiq::Config was introduced in sidekiq 7 and has a default
+      if Sidekiq.respond_to?(:default_configuration)
+        Sidekiq.default_configuration
+      else
+        # in older versions, it's just the `Sidekiq` module
+        Sidekiq
+      end
+    end
+
+    def initialize(config: default_config, client: Aws::CloudWatch::Client.new, namespace: "Sidekiq", exclude_queue_prefix: "", process_metrics: true, additional_dimensions: {}, interval: DEFAULT_INTERVAL)
+      # Required by Sidekiq::Component (in sidekiq 6.5+)
       @config = config
+
       @client = client
+      @interval_s = interval
       @namespace = namespace
       @process_metrics = process_metrics
       @exclude_queue_prefix = exclude_queue_prefix
@@ -57,7 +68,7 @@ module Sidekiq::CloudWatchMetrics
     end
 
     def start
-      logger.info { "Starting Sidekiq CloudWatch Metrics Publisher" }
+      logger.debug { "Starting Sidekiq CloudWatch Metrics Publisher" }
 
       @done = false
       @thread = safe_thread("cloudwatch metrics publisher", &method(:run))
@@ -70,19 +81,24 @@ module Sidekiq::CloudWatchMetrics
     def run
       logger.info { "Started Sidekiq CloudWatch Metrics Publisher" }
 
-      # Publish stats every INTERVAL seconds, sleeping as required between runs
+      # Publish stats every @interval_s seconds, sleeping as required between runs
       now = Time.now.to_f
       tick = now
       until @stop
         logger.debug { "Publishing Sidekiq CloudWatch Metrics" }
-        publish
+        begin
+          publish
+        rescue => e
+          logger.error("Error publishing Sidekiq CloudWatch Metrics: #{e}")
+          handle_exception(e)
+        end
 
         now = Time.now.to_f
-        tick = [tick + INTERVAL, now].max
+        tick = [tick + @interval_s, now].max
         sleep(tick - now) if tick > now
       end
 
-      logger.info { "Stopped Sidekiq CloudWatch Metrics Publisher" }
+      logger.debug { "Stopped Sidekiq CloudWatch Metrics Publisher" }
     end
 
     def publish
@@ -171,12 +187,22 @@ module Sidekiq::CloudWatchMetrics
         end.each do |(tag, tag_processes)|
           next if tag.nil?
 
+          tag_dimensions = [{name: "Tag", value: tag}]
+
+          metrics << {
+            metric_name: "Capacity",
+            dimensions: tag_dimensions,
+            timestamp: now,
+            value: calculate_capacity(tag_processes),
+            unit: "Count",
+          }
+
           tag_utilization = calculate_utilization(tag_processes) * 100.0
 
           unless tag_utilization.nan?
             metrics << {
               metric_name: "Utilization",
-              dimensions: [{name: "Tag", value: tag}],
+              dimensions: tag_dimensions,
               timestamp: now,
               value: tag_utilization,
               unit: "Percent",
@@ -190,7 +216,7 @@ module Sidekiq::CloudWatchMetrics
           unless process_utilization.nan?
             process_dimensions = [{name: "Hostname", value: process["hostname"]}]
 
-            if process["tag"]
+            if process["tag"] && !process["tag"].to_s.empty?
               process_dimensions << {name: "Tag", value: process["tag"]}
             end
 
@@ -235,6 +261,9 @@ module Sidekiq::CloudWatchMetrics
 
       # We can only put 20 metrics at a time
       metrics.each_slice(20) do |some_metrics|
+        if @interval_s < 60
+          metrics.each { |metric| metric.merge!(storage_resolution: 1) }
+        end
         @client.put_metric_data(
           namespace: @namespace,
           metric_data: some_metrics,
@@ -260,15 +289,17 @@ module Sidekiq::CloudWatchMetrics
     end
 
     def quiet
-      logger.info { "Quieting Sidekiq CloudWatch Metrics Publisher" }
+      logger.debug { "Quieting Sidekiq CloudWatch Metrics Publisher" }
       @stop = true
     end
 
     def stop
-      logger.info { "Stopping Sidekiq CloudWatch Metrics Publisher" }
+      logger.debug { "Stopping Sidekiq CloudWatch Metrics Publisher" }
       @stop = true
-      @thread.wakeup
-      @thread.join
+      if @thread
+        @thread.wakeup
+        @thread.join
+      end
     rescue ThreadError
       # Don't raise if thread is already dead.
       nil
