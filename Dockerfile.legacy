@@ -1,0 +1,22 @@
+# Dockerfile.legacy
+FROM ruby:3.3
+
+# 1. Install basic system dependencies
+# Ruby 3.3 images are quite robust; we mostly just need git to clone the repo
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential
+
+WORKDIR /build
+
+# 2. Clone your specific fork
+RUN git clone https://github.com/techvoxinc/sidekiq-cloudwatchmetrics.git .
+
+# 3. AUTO-VERSIONING (Using the safe dot separator)
+# Finds the version.rb file and appends '.shopvox' (e.g., changes '1.8.3' to '1.8.3.shopvox')
+RUN find lib -name "version.rb" -exec sed -i "s/VERSION = ['\"]\([^'\"]*\)['\"]/VERSION = '\1.shopvox'/" {} +
+
+# 4. Build the gem
+RUN mkdir /pkg
+# Build the gemspec, move the artifact to /pkg, and list the directory to verify
+CMD gem build *.gemspec && mv *.gem /pkg/ && ls -l /pkg/

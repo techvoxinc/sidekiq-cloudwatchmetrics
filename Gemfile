@@ -2,3 +2,5 @@ source "https://rubygems.org"
 
 # Specify your gem's dependencies in sidekiq-cloudwatch.gemspec
 gemspec
+
+gem "sidekiq", "~> 8.0"
